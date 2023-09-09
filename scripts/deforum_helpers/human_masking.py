@@ -1,3 +1,19 @@
+# Copyright (C) 2023 Deforum LLC
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Contact the authors: https://deforum.github.io/
+
 import os, cv2
 import torch
 from pathlib import Path
@@ -11,8 +27,7 @@ def extract_frames(input_video_path, output_imgs_path):
     frame_count = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
     
     # Create the output directory if it does not exist
-    if not os.path.exists(output_imgs_path):
-        os.makedirs(output_imgs_path)
+    os.makedirs(output_imgs_path, exist_ok=True)
         
     # Extract the frames
     for i in range(frame_count):
@@ -20,7 +35,6 @@ def extract_frames(input_video_path, output_imgs_path):
         if success:
             cv2.imwrite(os.path.join(output_imgs_path, f"frame{i}.png"), image)
     print(f"{frame_count} frames extracted and saved to {output_imgs_path}")
-    
     
 def video2humanmasks(input_frames_path, output_folder_path, output_type, fps):
     # freeze support is needed for video outputting
@@ -47,11 +61,11 @@ def video2humanmasks(input_frames_path, output_folder_path, output_type, fps):
     try:
         # Try to fetch the models from cache
         convert_video = torch.hub.load(predicted_torch_model_cache_path, "converter", source='local')
-        model = torch.hub.load(predicted_torch_model_cache_path, "mobilenetv3", source='local').cuda()
+        model = torch.hub.load(predicted_torch_model_cache_path, "resnet50", source='local').cuda()
     except:
         # Download from the internet if not found in cache
         convert_video = torch.hub.load("hithereai/RobustVideoMatting", "converter")
-        model = torch.hub.load("hithereai/RobustVideoMatting", "mobilenetv3").cuda()
+        model = torch.hub.load("hithereai/RobustVideoMatting", "resnet50").cuda()
         
     output_alpha_vid_path = os.path.join(output_folder_path, "human_masked_video.mp4")
     # extract humans masks from the input folder' imgs.

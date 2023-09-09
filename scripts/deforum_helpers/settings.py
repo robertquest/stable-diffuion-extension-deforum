@@ -1,150 +1,169 @@
-from math import ceil
+# Copyright (C) 2023 Deforum LLC
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Contact the authors: https://deforum.github.io/
+
 import os
 import json
-import deforum_helpers.args as deforum_args
-from .args import mask_fill_choices, DeforumArgs, DeforumAnimArgs
-import logging
+import modules.shared as sh
+from .args import DeforumArgs, DeforumAnimArgs, DeforumOutputArgs, ParseqArgs, LoopArgs, get_settings_component_names, pack_args
+from .deforum_controlnet import controlnet_component_names
+from .defaults import mask_fill_choices
+from .deprecation_utils import handle_deprecated_settings
+from .general_utils import get_deforum_version, clean_gradio_path_strings
 
-def load_args(args_dict,anim_args_dict, parseq_args_dict, loop_args_dict, custom_settings_file, root):
-    print(f"reading custom settings from {custom_settings_file}")
-    if not os.path.isfile(custom_settings_file):
-        print('The custom settings file does not exist. The in-notebook settings will be used instead')
-    else:
-        with open(custom_settings_file, "r") as f:
+def get_keys_to_exclude():
+    return ["init_sample", "perlin_w", "perlin_h", "image_path", "outdir", "init_image_box"]
+    # perlin params are used just not shown in ui for now, so not to be deleted
+    # image_path and outdir are in use, not to be deleted
+    # init_image_box is PIL object not string, so ignore.
+
+def load_args(args_dict_main, args, anim_args, parseq_args, loop_args, controlnet_args, video_args, custom_settings_file, root, run_id):
+    custom_settings_file = custom_settings_file[run_id]
+    print(f"reading custom settings from {custom_settings_file.name}")
+    if not os.path.isfile(custom_settings_file.name):
+        print('Custom settings file does not exist. Using in-notebook settings.')
+        return
+    with open(custom_settings_file.name, "r") as f:
+        try:
             jdata = json.loads(f.read())
-            root.animation_prompts = jdata["prompts"]
-            for i, k in enumerate(args_dict):
-                if k in jdata:
-                    args_dict[k] = jdata[k]
-                else:
-                    print(f"key {k} doesn't exist in the custom settings data! using the default value of {args_dict[k]}")
-            for i, k in enumerate(anim_args_dict):
-                if k in jdata:
-                    anim_args_dict[k] = jdata[k]
-                else:
-                    print(f"key {k} doesn't exist in the custom settings data! using the default value of {anim_args_dict[k]}")
-            for i, k in enumerate(parseq_args_dict):
-                if k in jdata:
-                    parseq_args_dict[k] = jdata[k]
-                else:
-                    print(f"key {k} doesn't exist in the custom settings data! using the default value of {parseq_args_dict[k]}")                    
-            for i, k in enumerate(loop_args_dict):
-                if k in jdata:
-                    loop_args_dict[k] = jdata[k]
-                else:
-                    print(f"key {k} doesn't exist in the custom settings data! using the default value of {loop_args_dict[k]}")                    
-            print(args_dict)
-            print(anim_args_dict)
-            print(parseq_args_dict)
-            print(loop_args_dict)
-            
+        except:
+            return False
+        handle_deprecated_settings(jdata)
+        root.animation_prompts = jdata.get("prompts", root.animation_prompts)
+        if "animation_prompts_positive" in jdata:
+            args_dict_main['animation_prompts_positive'] = jdata["animation_prompts_positive"]
+        if "animation_prompts_negative" in jdata:
+            args_dict_main['animation_prompts_negative'] = jdata["animation_prompts_negative"]
+        keys_to_exclude = get_keys_to_exclude()
+        for args_namespace in [args, anim_args, parseq_args, loop_args, controlnet_args, video_args]:
+            for k, v in vars(args_namespace).items():
+                if k not in keys_to_exclude:
+                    if k in jdata:
+                        setattr(args_namespace, k, jdata[k])
+                    else:
+                        print(f"Key {k} doesn't exist in the custom settings data! Using default value of {v}")
+        print(args, anim_args, parseq_args, loop_args)
+        return True
 
-import gradio as gr
- 
-# In gradio gui settings save/load
+# save settings function that get calls when run_deforum is being called
+def save_settings_from_animation_run(args, anim_args, parseq_args, loop_args, controlnet_args, video_args, root, full_out_file_path = None):
+    if full_out_file_path:
+        args.__dict__["seed"] = root.raw_seed
+        args.__dict__["batch_name"] = root.raw_batch_name
+    args.__dict__["prompts"] = root.animation_prompts
+    args.__dict__["positive_prompts"] = args.positive_prompts
+    args.__dict__["negative_prompts"] = args.negative_prompts
+    exclude_keys = get_keys_to_exclude()
+    settings_filename = full_out_file_path if full_out_file_path else os.path.join(args.outdir, f"{root.timestring}_settings.txt")
+    with open(settings_filename, "w+", encoding="utf-8") as f:
+        s = {}
+        for d in (args.__dict__, anim_args.__dict__, parseq_args.__dict__, loop_args.__dict__, controlnet_args.__dict__, video_args.__dict__):
+            s.update({k: v for k, v in d.items() if k not in exclude_keys})
+        s["sd_model_name"] = sh.sd_model.sd_checkpoint_info.name
+        s["sd_model_hash"] = sh.sd_model.sd_checkpoint_info.hash
+        s["deforum_git_commit_id"] = get_deforum_version()
+        json.dump(s, f, ensure_ascii=False, indent=4)
+
+# In gradio gui settings save/ load funcs:
 def save_settings(*args, **kwargs):
-    settings_path = args[0]
-    data = {deforum_args.settings_component_names[i]: args[i+1] for i in range(0, len(deforum_args.settings_component_names))}
-    from deforum_helpers.args import pack_args, pack_anim_args, pack_parseq_args, pack_loop_args
-    args_dict = pack_args(data)
-    anim_args_dict = pack_anim_args(data)
-    parseq_dict = pack_parseq_args(data)
+    settings_path = args[0].strip()
+    settings_path = clean_gradio_path_strings(settings_path)
+    settings_path = os.path.realpath(settings_path)
+    settings_component_names = get_settings_component_names()
+    data = {settings_component_names[i]: args[i+1] for i in range(0, len(settings_component_names))}
+    args_dict = pack_args(data, DeforumArgs)
+    anim_args_dict = pack_args(data, DeforumAnimArgs)
+    parseq_dict = pack_args(data, ParseqArgs)
     args_dict["prompts"] = json.loads(data['animation_prompts'])
-    loop_dict = pack_loop_args(data)
+    args_dict["animation_prompts_positive"] = data['animation_prompts_positive']
+    args_dict["animation_prompts_negative"] = data['animation_prompts_negative']
+    loop_dict = pack_args(data, LoopArgs)
+    controlnet_dict = pack_args(data, controlnet_component_names)
+    video_args_dict = pack_args(data, DeforumOutputArgs)
+    combined = {**args_dict, **anim_args_dict, **parseq_dict, **loop_dict, **controlnet_dict, **video_args_dict}
+    exclude_keys = get_keys_to_exclude()
+    filtered_combined = {k: v for k, v in combined.items() if k not in exclude_keys}
+    filtered_combined["sd_model_name"] = sh.sd_model.sd_checkpoint_info.name
+    filtered_combined["sd_model_hash"] = sh.sd_model.sd_checkpoint_info.hash
+    filtered_combined["deforum_git_commit_id"] = get_deforum_version()
     print(f"saving custom settings to {settings_path}")
-    with open(settings_path, "w") as f:
-        f.write(json.dumps({**args_dict, **anim_args_dict, **parseq_dict, **loop_dict}, ensure_ascii=False, indent=4))
+    with open(settings_path, "w", encoding='utf-8') as f:
+        f.write(json.dumps(filtered_combined, ensure_ascii=False, indent=4))
+    
     return [""]
 
-def save_video_settings(*args, **kwargs):
-    video_settings_path = args[0]
-    data = {deforum_args.video_args_names[i]: args[i+1] for i in range(0, len(deforum_args.video_args_names))}
-    from deforum_helpers.args import pack_video_args
-    video_args_dict = pack_video_args(data)
-    print(f"saving video settings to {video_settings_path}")
-    with open(video_settings_path, "w") as f:
-        f.write(json.dumps(video_args_dict, ensure_ascii=False, indent=4))
-    return [""]
-
-def load_settings(*args, **kwargs):
-    settings_path = args[0]
-    data = {deforum_args.settings_component_names[i]: args[i+1] for i in range(0, len(deforum_args.settings_component_names))}
+def load_all_settings(*args, ui_launch=False, **kwargs):
+    import gradio as gr
+    settings_path = args[0].strip()
+    settings_path = clean_gradio_path_strings(settings_path)
+    settings_path = os.path.realpath(settings_path)
+    settings_component_names = get_settings_component_names()
+    data = {settings_component_names[i]: args[i+1] for i in range(len(settings_component_names))}
     print(f"reading custom settings from {settings_path}")
-    jdata = {}
+
     if not os.path.isfile(settings_path):
         print('The custom settings file does not exist. The values will be unchanged.')
-        return [data[name] for name in deforum_args.settings_component_names] + [""]
-    else:
-        with open(settings_path, "r") as f:
-            jdata = json.loads(f.read())
-    ret = []
-
-    if 'animation_prompts' in jdata:
-        jdata['prompts'] = jdata['animation_prompts']#compatibility with old versions
-
-    for key in data:
-        if key == 'sampler':
-            sampler_val = jdata[key]
-            if type(sampler_val) == int:
-                from modules.sd_samplers import samplers_for_img2img
-                ret.append(samplers_for_img2img[sampler_val].name)
-            else:
-                ret.append(sampler_val)
-        
-        elif key == 'fill':
-            if key in jdata:
-                fill_val = jdata[key]
-                if type(fill_val) == int:                    
-                    ret.append(mask_fill_choices[fill_val])
-                else:
-                    ret.append(fill_val)
-            else:
-                fill_default = DeforumArgs()['fill']
-                logging.debug(f"Fill not found in load file, using default value: {fill_default}")
-                ret.append(mask_fill_choices[fill_default])
-        
-        elif key == 'reroll_blank_frames':
-            if key in jdata:
-                reroll_blank_frames_val = jdata[key]
-                ret.append(reroll_blank_frames_val)
-            else:
-                reroll_blank_frames_default = DeforumArgs()['reroll_blank_frames']
-                logging.debug(f"Reroll blank frames not found in load file, using default value: {reroll_blank_frames_default}")
-                ret.append(reroll_blank_frames_default)
-        
-        elif key == 'noise_type':
-            if key in jdata:
-                noise_type_val = jdata[key]
-                ret.append(noise_type_val)
-            else:
-                noise_type_default = DeforumAnimArgs()['noise_type']
-                logging.debug(f"Noise type not found in load file, using default value: {noise_type_default}")
-                ret.append(noise_type_default)
-            
-        elif key in jdata:
-            ret.append(jdata[key])
+        if ui_launch:
+            return ({key: gr.update(value=value) for key, value in data.items()},)
         else:
-            if key == 'animation_prompts':
-                ret.append(json.dumps(jdata['prompts'], ensure_ascii=False, indent=4))
-            else:
-                ret.append(data[key])
+            return list(data.values()) + [""]
 
-    #stuff
-    ret.append("")
+    with open(settings_path, "r", encoding='utf-8') as f:
+        jdata = json.load(f)
+        handle_deprecated_settings(jdata)
+        if 'animation_prompts' in jdata:
+            jdata['prompts'] = jdata['animation_prompts']
 
-    return ret
+    result = {}
+    for key, default_val in data.items():
+        val = jdata.get(key, default_val)
+        if key == 'sampler' and isinstance(val, int):
+            from modules.sd_samplers import samplers_for_img2img
+            val = samplers_for_img2img[val].name
+        elif key == 'fill' and isinstance(val, int):
+            val = mask_fill_choices[val]
+        elif key in {'reroll_blank_frames', 'noise_type'} and key not in jdata:
+            default_key_val = (DeforumArgs if key != 'noise_type' else DeforumAnimArgs)[key]
+            print(f"{key} not found in load file, using default value: {default_key_val}")
+            val = default_key_val
+        elif key in {'animation_prompts_positive', 'animation_prompts_negative'}:
+            val = jdata.get(key, default_val)
+        elif key == 'animation_prompts':
+            val = json.dumps(jdata['prompts'], ensure_ascii=False, indent=4)
+
+        result[key] = val
+
+    if ui_launch:
+        return ({key: gr.update(value=value) for key, value in result.items()},)
+    else:
+        return list(result.values()) + [""]
+
 
 def load_video_settings(*args, **kwargs):
-    video_settings_path = args[0]
-    data = {deforum_args.video_args_names[i]: args[i+1] for i in range(0, len(deforum_args.video_args_names))}
+    video_settings_path = args[0].strip()
+    vid_args_names = list(DeforumOutputArgs().keys())
+    data = {vid_args_names[i]: args[i+1] for i in range(0, len(vid_args_names))}
     print(f"reading custom video settings from {video_settings_path}")
     jdata = {}
     if not os.path.isfile(video_settings_path):
         print('The custom video settings file does not exist. The values will be unchanged.')
-        return [data[name] for name in deforum_args.video_args_names] + [""]
+        return [data[name] for name in vid_args_names] + [""]
     else:
         with open(video_settings_path, "r") as f:
             jdata = json.loads(f.read())
+            handle_deprecated_settings(jdata)
     ret = []
 
     for key in data:
@@ -159,86 +178,4 @@ def load_video_settings(*args, **kwargs):
         else:
             ret.append(data[key])
     
-    #stuff
-    ret.append("")
-    
     return ret
-
-import tqdm
-from modules.shared import state, progress_print_out, opts, cmd_opts
-class DeforumTQDM:
-    def __init__(self, args, anim_args, parseq_args):
-        self._tqdm = None
-        self._args = args
-        self._anim_args = anim_args
-        self._parseq_args = parseq_args
-
-    def reset(self):
-        from .animation_key_frames import DeformAnimKeys
-        from .parseq_adapter import ParseqAnimKeys
-        deforum_total = 0
-        # FIXME: get only amount of steps
-        use_parseq = self._parseq_args.parseq_manifest != None and self._parseq_args.parseq_manifest.strip()
-        keys = DeformAnimKeys(self._anim_args) if not use_parseq else ParseqAnimKeys(self._parseq_args, self._anim_args)        
-        
-        start_frame = 0
-        if self._anim_args.resume_from_timestring:
-            for tmp in os.listdir(self._args.outdir):
-                filename = tmp.split("_")
-                # don't use saved depth maps to count number of frames
-                if self._anim_args.resume_timestring in filename and "depth" not in filename:
-                    start_frame += 1
-            start_frame = start_frame - 1
-        using_vid_init = self._anim_args.animation_mode == 'Video Input'
-        turbo_steps = 1 if using_vid_init else int(self._anim_args.diffusion_cadence)
-        if self._anim_args.resume_from_timestring:
-            last_frame = start_frame-1
-            if turbo_steps > 1:
-                last_frame -= last_frame%turbo_steps
-            if turbo_steps > 1:
-                turbo_next_frame_idx = last_frame
-                turbo_prev_frame_idx = turbo_next_frame_idx
-                start_frame = last_frame+turbo_steps
-        frame_idx = start_frame
-        had_first = False
-        while frame_idx < self._anim_args.max_frames:
-            strength = keys.strength_schedule_series[frame_idx]
-            if not had_first and self._args.use_init and self._args.init_image != None and self._args.init_image != '':
-                deforum_total += int(ceil(self._args.steps * (1-strength)))
-                had_first = True
-            elif not had_first:
-                deforum_total += self._args.steps
-                had_first = True
-            else:
-                deforum_total += int(ceil(self._args.steps * (1-strength)))
-
-            if turbo_steps > 1:
-                frame_idx += turbo_steps
-            else:
-                frame_idx += 1
-        
-        self._tqdm = tqdm.tqdm(
-            desc="Deforum progress",
-            total=deforum_total,
-            position=1,
-            file=progress_print_out
-        )
-
-    def update(self):
-        if not opts.multiple_tqdm or cmd_opts.disable_console_progressbars:
-            return
-        if self._tqdm is None:
-            self.reset()
-        self._tqdm.update()
-
-    def updateTotal(self, new_total):
-        if not opts.multiple_tqdm or cmd_opts.disable_console_progressbars:
-            return
-        if self._tqdm is None:
-            self.reset()
-        self._tqdm.total=new_total
-
-    def clear(self):
-        if self._tqdm is not None:
-            self._tqdm.close()
-            self._tqdm = None

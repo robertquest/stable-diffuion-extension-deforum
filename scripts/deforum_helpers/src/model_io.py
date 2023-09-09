@@ -4,13 +4,11 @@ import torch
 
 
 def save_weights(model, filename, path="./saved_models"):
-    if not os.path.isdir(path):
-        os.makedirs(path)
+    os.makedirs(path, exist_ok=True)
 
     fpath = os.path.join(path, filename)
     torch.save(model.state_dict(), fpath)
     return
-
 
 def save_checkpoint(model, optimizer, epoch, filename, root="./checkpoints"):
     if not os.path.isdir(root):
@@ -25,16 +23,16 @@ def save_checkpoint(model, optimizer, epoch, filename, root="./checkpoints"):
         }
         , fpath)
 
-
 def load_weights(model, filename, path="./saved_models"):
     fpath = os.path.join(path, filename)
     state_dict = torch.load(fpath)
     model.load_state_dict(state_dict)
     return model
 
-
 def load_checkpoint(fpath, model, optimizer=None):
     ckpt = torch.load(fpath, map_location='cpu')
+    if ckpt is None:
+        raise Exception(f"\nERROR Loading AdaBins_nyu.pt. Read this for a fix:\nhttps://github.com/deforum-art/deforum-for-automatic1111-webui/wiki/FAQ-&-Troubleshooting#3d-animation-mode-is-not-working-only-2d-works")
     if optimizer is None:
         optimizer = ckpt.get('optimizer', None)
     else:

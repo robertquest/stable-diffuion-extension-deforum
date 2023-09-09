@@ -1,26 +1,36 @@
+# Copyright (C) 2023 Deforum LLC
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, version 3 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Contact the authors: https://deforum.github.io/
+
 import requests
 import os
-from PIL import Image, ImageOps
-import cv2
-import numpy as np
+from PIL import Image
 import socket
 import torchvision.transforms.functional as TF
+from .general_utils import clean_gradio_path_strings
 
-def load_img(path : str, shape=None, use_alpha_as_mask=False):
+def load_img(path : str, image_box :Image.Image, shape=None, use_alpha_as_mask=False):
     # use_alpha_as_mask: Read the alpha channel of the image as the mask image
-    image = load_image(path)
-    if use_alpha_as_mask:
-        image = image.convert('RGBA')
-    else:
-        image = image.convert('RGB')
-
-    if shape is not None:
-        image = image.resize(shape, resample=Image.LANCZOS)
+    image = load_image(path, image_box)
+    image = image.convert('RGBA') if use_alpha_as_mask else image.convert('RGB')
+    image = image.resize(shape, resample=Image.LANCZOS) if shape is not None else image
 
     mask_image = None
     if use_alpha_as_mask:
         # Split alpha channel into a mask_image
-        red, green, blue, alpha = Image.Image.split(image)
+        red, green, blue, alpha = Image.Image.split(image) # not interested in R G or B, just in the alpha channel
         mask_image = alpha.convert('L')
         image = image.convert('RGB')
         
@@ -33,7 +43,12 @@ def load_img(path : str, shape=None, use_alpha_as_mask=False):
 
     return image, mask_image
 
-def load_image(image_path :str):
+def load_image(image_path :str, image_box :Image.Image):
+    # If init_image_box was used then no need to fetch the image via URL, just return the Image object directly.
+    if isinstance(image_box, Image.Image):
+        return image_box
+
+    image_path = clean_gradio_path_strings(image_path)
     image = None
     if image_path.startswith('http://') or image_path.startswith('https://'):
         try:
@@ -41,18 +56,18 @@ def load_image(image_path :str):
             s = socket.create_connection((host, 80), 2)
             s.close()
         except:
-            raise ConnectionError("There is no active internet connection available - please use local masks and init files only.")
-        
+            raise ConnectionError("There is no active internet connection available (couldn't connect to google.com as a network test) - please use *local* masks and init files only.")
         try:
             response = requests.get(image_path, stream=True)
         except requests.exceptions.RequestException as e:
-            raise ConnectionError("Failed to download image due to no internet connection. Error: {}".format(e))
+            raise ConnectionError(f"Failed to download image {image_path} due to no internet connection. Error: {e}")
         if response.status_code == 404 or response.status_code != 200:
-            raise ConnectionError("Init image url or mask image url is not valid")
+            raise ConnectionError(f"Init image url or mask image url is not valid: {image_path}")
         image = Image.open(response.raw).convert('RGB')
     else:
+        image_path = os.path.realpath(image_path)
         if not os.path.exists(image_path):
-            raise RuntimeError("Init image path or mask image path is not valid")
+            raise RuntimeError(f"Init image path or mask image path is not valid: {image_path}")
         image = Image.open(image_path).convert('RGB')
         
     return image
@@ -61,10 +76,8 @@ def prepare_mask(mask_input, mask_shape, mask_brightness_adjust=1.0, mask_contra
     """
     prepares mask for use in webui
     """
-    if isinstance(mask_input, Image.Image):
-        mask = mask_input
-    else :
-        mask = load_image(mask_input)
+    # Aparently 'mask_input' can be both path and Image object.
+    mask = load_image(mask_input, mask_input)
     mask = mask.resize(mask_shape, resample=Image.LANCZOS)
     if mask_brightness_adjust != 1:
         mask = TF.adjust_brightness(mask, mask_brightness_adjust)
@@ -73,6 +86,10 @@ def prepare_mask(mask_input, mask_shape, mask_brightness_adjust=1.0, mask_contra
     mask = mask.convert('L')
     return mask
 
+# "check_mask_for_errors" may have prevented errors in composable masks,
+# but it CAUSES errors on any frame where it's all black.
+# Bypassing the check below until we can fix it even better.
+# This may break composable masks, but it makes ACTUAL masks usable.
 def check_mask_for_errors(mask_input, invert_mask=False):
     extrema = mask_input.getextrema()
     if (invert_mask):
@@ -84,16 +101,12 @@ def check_mask_for_errors(mask_input, invert_mask=False):
         return None
     else:
         return mask_input    
-
+ 
 def get_mask(args):
-    return check_mask_for_errors(
-         prepare_mask(args.mask_file, (args.W, args.H), args.mask_contrast_adjust, args.mask_brightness_adjust)
-    )
+    return prepare_mask(args.mask_file, (args.W, args.H), args.mask_contrast_adjust, args.mask_brightness_adjust)
 
 def get_mask_from_file(mask_file, args):
-    return check_mask_for_errors(
-         prepare_mask(mask_file, (args.W, args.H), args.mask_contrast_adjust, args.mask_brightness_adjust)
-    )
+    return prepare_mask(mask_file, (args.W, args.H), args.mask_contrast_adjust, args.mask_brightness_adjust)
 
 def blank_if_none(mask, w, h, mode):
     return Image.new(mode, (w, h), (0)) if mask is None else mask
