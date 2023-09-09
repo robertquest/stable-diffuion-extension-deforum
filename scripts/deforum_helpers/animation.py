@@ -8,7 +8,9 @@ from einops import rearrange
 from .prompt import check_is_number
 
 # Webui
-from modules.shared import state
+from modules.shared import state, opts
+
+DEBUG_MODE = opts.data.get("deforum_debug_mode_enabled", False)
 
 def sample_from_cv2(sample: np.ndarray) -> torch.Tensor:
     sample = ((sample.astype(float) / 255.0) * 2) - 1
@@ -159,7 +161,8 @@ def anim_frame_warp(prev_img_cv2, args, anim_args, keys, frame_idx, depth_model=
 
     if anim_args.use_depth_warping:
         if depth is None and depth_model is not None:
-            depth = depth_model.predict(prev_img_cv2, anim_args, half_precision)
+            depth = depth_model.predict(prev_img_cv2, anim_args.midas_weight, half_precision)
+            
     else:
         depth = None
 
@@ -175,10 +178,11 @@ def anim_frame_warp_2d(prev_img_cv2, args, anim_args, keys, frame_idx):
     zoom = keys.zoom_series[frame_idx]
     translation_x = keys.translation_x_series[frame_idx]
     translation_y = keys.translation_y_series[frame_idx]
-
-    center = (args.W // 2, args.H // 2)
+    transform_center_x = keys.transform_center_x_series[frame_idx]
+    transform_center_y = keys.transform_center_y_series[frame_idx]
+    center_point = (args.W * transform_center_x, args.H * transform_center_y)
+    rot_mat = cv2.getRotationMatrix2D(center_point, angle, zoom)
     trans_mat = np.float32([[1, 0, translation_x], [0, 1, translation_y]])
-    rot_mat = cv2.getRotationMatrix2D(center, angle, zoom)
     trans_mat = np.vstack([trans_mat, [0,0,1]])
     rot_mat = np.vstack([rot_mat, [0,0,1]])
     if anim_args.enable_perspective_flip:
@@ -216,7 +220,11 @@ def transform_image_3d(device, prev_img_cv2, depth_tensor, rot_mat, translate, a
     # adapted and optimized version of transform_image_3d from Disco Diffusion https://github.com/alembics/disco-diffusion 
     w, h = prev_img_cv2.shape[1], prev_img_cv2.shape[0]
 
-    aspect_ratio = float(w)/float(h)
+    if anim_args.aspect_ratio_use_old_formula:
+        aspect_ratio = float(w)/float(h)
+    else:
+        aspect_ratio = keys.aspect_ratio_series[frame_idx]
+    
     near = keys.near_series[frame_idx]
     far = keys.far_series[frame_idx]
     fov_deg = keys.fov_series[frame_idx]
